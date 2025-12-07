@@ -15,6 +15,7 @@ on:
     branches:
       - main
       - develop
+      - feature/test
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -41,12 +42,12 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Checkout Nutest Repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: v1.0.1
+          ref: main
           path: nutest
           repository: vyadh/nutest
           sparse-checkout: nutest/
@@ -62,7 +63,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           use ${{ github.workspace }}/nutest/nutest
-          use ${{ github.workspace }}/nu/review.nu [prepare-awk]
+          use ${{ github.workspace }}/nu/util.nu [prepare-awk]
           prepare-awk
           (
             nutest run-tests

@@ -25,15 +25,18 @@
 #  - Local Repo Review: just cr -f HEAD~1 --debug
 #  - Local PR Review: just cr -r hustcer/deepseek-review -n 32
 
-use kv.nu *
+use std-rfc/kv *
+use diff.nu [get-diff]
 use common.nu [
   ECODE, NO_TOKEN_TIP, hr-line, is-installed, windows?, mac?,
-  compare-ver, compact-record, git-check, has-ref,
+  compare-ver, compact-record, git-check, has-ref, GITHUB_API_BASE
 ]
 
-const RESPONSE_END = 'data: [DONE]'
-
-const GITHUB_API_BASE = 'https://api.github.com'
+const IGNORED_MESSAGES = {
+  '-alive': true,                   # The server is alive
+  'data: [DONE]': true,             # The end of the response
+  ': OPENROUTER PROCESSING': true,  # OPENROUTER in PROCESSING message
+}
 
 # It takes longer to respond to requests made with unknown/rare user agents.
 # When make http post pretend to be curl, it gets a response just as quickly as curl.
@@ -41,24 +44,22 @@ const HTTP_HEADERS = [User-Agent curl/8.9]
 
 const DEFAULT_OPTIONS = {
   MODEL: 'deepseek-chat',
-  TEMPERATURE: 1.0,
+  TEMPERATURE: 0.3,
   BASE_URL: 'https://api.deepseek.com',
   USER_PROMPT: 'Please review the following code changes:',
   SYS_PROMPT: 'You are a professional code review assistant responsible for analyzing code changes in GitHub Pull Requests. Identify potential issues such as code style violations, logical errors, security vulnerabilities, and provide improvement suggestions. Clearly list the problems and recommendations in a concise manner.',
 }
-
-# If the PR title or body contains any of these keywords, skip the review
-const IGNORE_REVIEW_KEYWORDS = ['skip review' 'skip cr']
 
 # Use DeepSeek AI to review code changes locally or in GitHub Actions
 export def --env deepseek-review [
   token?: string,           # Your DeepSeek API token, fallback to CHAT_TOKEN env var
   --debug(-d),              # Debug mode
   --repo(-r): string,       # GitHub repo name, e.g. hustcer/deepseek-review, or local repo path / alias
+  --output(-o): string,     # Output file path
   --pr-number(-n): string,  # GitHub PR number
   --gh-token(-k): string,   # Your GitHub token, fallback to GITHUB_TOKEN env var
-  --diff-to(-t): string,    # Diff to git REF
-  --diff-from(-f): string,  # Diff from git REF
+  --diff-to(-t): string,    # Git diff ending commit SHA
+  --diff-from(-f): string,  # Git diff starting commit SHA
   --patch-cmd(-c): string,  # The `git show` or `git diff` command to get the diff content, for local CR only
   --max-length(-l): int,    # Maximum length of the content for review, 0 means no limit.
   --model(-m): string,      # Model name, or read from CHAT_MODEL env var, `deepseek-chat` by default
@@ -68,21 +69,25 @@ export def --env deepseek-review [
   --user-prompt(-u): string # Default to $DEFAULT_OPTIONS.USER_PROMPT,
   --include(-i): string,    # Comma separated file patterns to include in the code review
   --exclude(-x): string,    # Comma separated file patterns to exclude in the code review
-  --temperature(-T): float, # Temperature for the model, between `0` and `2`, default value `1.0`
+  --temperature(-T): float, # Temperature for the model, between `0` and `2`, default value `0.3`
 ]: nothing -> nothing {
 
   $env.config.table.mode = 'psql'
   let local_repo = $env.PWD
+  let write_file = ($output | is-not-empty)
   let is_action = ($env.GITHUB_ACTIONS? == 'true')
-  let stream = if $is_action { false } else { true }
   let token = $token | default $env.CHAT_TOKEN?
   let repo = $repo | default $env.DEFAULT_GITHUB_REPO?
   let CHAT_HEADER = [Authorization $'Bearer ($token)']
+  let stream = if $is_action or $write_file { false } else { true }
   let model = $model | default $env.CHAT_MODEL? | default $DEFAULT_OPTIONS.MODEL
   let base_url = $base_url | default $env.BASE_URL? | default $DEFAULT_OPTIONS.BASE_URL
   let url = $chat_url | default $env.CHAT_URL? | default $'($base_url)/chat/completions'
   let max_length = try { $max_length | default ($env.MAX_LENGTH? | default 0 | into int) } catch { 0 }
   let temperature = try { $temperature | default $env.TEMPERATURE? | default $DEFAULT_OPTIONS.TEMPERATURE | into float } catch { $DEFAULT_OPTIONS.TEMPERATURE }
+  # Determine output mode
+  let output_mode = if $is_action { 'action' } else if ($output | is-not-empty) { 'file' } else { 'console' }
+
   validate-temperature $temperature
   let setting = {
     repo: $repo,
@@ -109,7 +114,7 @@ export def --env deepseek-review [
   print $hint; print -n (char nl)
   if ($pr_number | is-empty) {
     print 'Current Settings:'; hr-line
-    $setting | compact-record | reject -i repo | print; print -n (char nl)
+    $setting | compact-record | reject -o repo | print; print -n (char nl)
   }
 
   let content = (
@@ -146,23 +151,56 @@ export def --env deepseek-review [
     print $'✖️ Code review failed！Error: '; hr-line; print $response
     exit $ECODE.SERVER_ERROR
   }
-  let reason = $response | get -i choices.0.message.reasoning_content
-  let review = $response | get -i choices.0.message.content | default ($response | get -i message.content)
+  let message = $response | get -o choices.0.message
+  let reason = $message | coalesce-reasoning
+  let review = $message.content? | default ($response | get -o message.content)
   let result = ['<details>' '<summary> Reasoning Details</summary>' $reason "</details>\n" $review] | str join "\n"
   if ($review | is-empty) {
     print $'✖️ Code review failed！No review result returned from ($base_url) ...'
     exit $ECODE.SERVER_ERROR
   }
   let result = if ($reason | is-empty) { $review } else { $result }
-  if not $is_action {
-    print $'Code Review Result:'; hr-line; print $result
-  } else {
-    post-comments-to-pr $repo $pr_number $result
-    print $'✅ Code review finished！PR (ansi g)#($pr_number)(ansi reset) review result was posted as a comment.'
+
+  match $output_mode {
+    'action' => {
+      post-comments-to-pr $repo $pr_number $result
+      print $'✅ Code review finished！PR (ansi g)#($pr_number)(ansi reset) review result was posted as a comment.'
+    }
+    'file' => { write-review-to-file $output $setting $result $response }
+    _ => { print $'Code Review Result:'; hr-line; print $result }
   }
+
   if ($response.usage? | is-not-empty) {
     print $'(char nl)Token Usage:'; hr-line
     $response.usage? | table -e | print
+  }
+}
+
+# Write the code review result to a file
+def write-review-to-file [
+  file: string,           # Output file path
+  setting: record,        # Review settings
+  result: string,         # Review result
+  response: record,       # DeepSeek API response
+] {
+  let file = (if not ($file | str ends-with '.md') { $'($file).md' } else { $file })
+  let token_usage = if ($response.usage? | is-empty) { [] } else {
+    ['## Token Usage', '', ($response.usage? | transpose key val | to md --pretty)]
+  }
+  # Generate content sections
+  let content_sections = [
+    '# DeepSeek Code Review Result', ''
+    $"Generated at: (date now | format date '%Y/%m/%d %H:%M:%S')", ''
+    '## Code Review Settings', ''
+    ($setting | compact-record | reject -o repo | transpose key val | to md --pretty)
+    '', '## Review Detail', '', $result, '', ...$token_usage
+  ]
+  try {
+    $content_sections | str join (char nl) | save --force $file
+    print $'Code Review Result saved to (ansi g)($file)(ansi reset)'
+  } catch {|err|
+    print $'(ansi r)Failed to save review result: (ansi reset)'
+    $err | table -e | print
   }
 }
 
@@ -225,219 +263,46 @@ def streaming-output [
       }
     | try { lines } catch { print $'(ansi r)Error Happened ...(ansi reset)'; exit $ECODE.SERVER_ERROR }
     | each {|line|
-        if $line == $RESPONSE_END { return }
         if ($line | is-empty) { return }
-        # DeepSeek Response vs Local Ollama Response
-        let $last = if $line =~ '^data: ' { $line | str substring 6.. | from json } else { $line | from json }
-        if $last == '-alive' { print $last; return }
+        if ($IGNORED_MESSAGES | get -o $line | default false) { return }
+        let $last = $line | parse-line
         if $debug { $last | to json | kv set last-reply }
-        $last | get -i choices.0.delta | default ($last | get -i message) | if ($in | is-not-empty) {
+        $last | get -o choices.0.delta | default ($last | get -o message) | if ($in | is-not-empty) {
           let delta = $in
-          if ($delta.reasoning_content? | is-not-empty) { kv set reasoning ((kv get reasoning) + 1) }
+          if ($delta | coalesce-reasoning | is-not-empty) { kv set reasoning ((kv get reasoning) + 1) }
           if (kv get reasoning) == 1 { print $'(char nl)Reasoning Details:'; hr-line }
           if ($delta.content | is-not-empty) { kv set content ((kv get content) + 1) }
           if (kv get content) == 1 { print $'(char nl)Review Details:'; hr-line }
-          print -n ($delta.reasoning_content? | default $delta.content)
+          print -n ($delta | coalesce-reasoning | default $delta.content)
         }
       }
 
   if $debug and (kv get last-reply | is-not-empty) {
     print $'(char nl)(char nl)Model & Token Usage:'; hr-line
-    kv get last-reply | from json | select -i model usage | table -e | print
+    kv get last-reply | from json | select -o model usage | table -e | print
   }
 }
 
-# Get the diff content from GitHub PR or local git changes
-export def get-diff [
-  --repo: string,       # GitHub repository name
-  --pr-number: string,  # GitHub PR number
-  --diff-to: string,    # Diff to git ref
-  --diff-from: string,  # Diff from git ref
-  --include: string,    # Comma separated file patterns to include in the code review
-  --exclude: string,    # Comma separated file patterns to exclude in the code review
-  --patch-cmd: string,  # The `git show` or `git diff` command to get the diff content
-] {
-  let local_repo = $env.PWD
-  let BASE_HEADER = [Authorization $'Bearer ($env.GH_TOKEN)' Accept application/vnd.github.v3+json]
-  let DIFF_HEADER = [Authorization $'Bearer ($env.GH_TOKEN)' Accept application/vnd.github.v3.diff]
-  mut content = if ($pr_number | is-not-empty) {
-    if ($repo | is-empty) {
-      print $'(ansi r)Please provide the GitHub repository name by `--repo` option.(ansi reset)'
-      exit $ECODE.INVALID_PARAMETER
+# Parse the line from the streaming response
+def parse-line [] {
+  let $line = $in
+  # DeepSeek Response vs Local Ollama Response
+  try {
+    if $line =~ '^data: ' {
+      $line | str substring 6.. | from json
+    } else {
+      $line | from json
     }
-    # TODO: Ignore keywords checking when triggering by mentioning the bot
-    let description = http get -H $BASE_HEADER $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)'
-                                        | select title body | values | str join "\n"
-    if ($IGNORE_REVIEW_KEYWORDS | any {|it| $description =~ $it }) {
-      print $'(ansi r)The PR title or body contains keywords to skip the review, bye...(ansi reset)'
-      exit $ECODE.SUCCESS
-    }
-    http get -H $DIFF_HEADER $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)' | str trim
-  } else if ($diff_from | is-not-empty) {
-    if not (has-ref $diff_from) {
-      print $'(ansi r)The specified git ref ($diff_from) does not exist, please check it again.(ansi reset)'
-      exit $ECODE.INVALID_PARAMETER
-    }
-    if ($diff_to | is-not-empty) and not (has-ref $diff_to) {
-      print $'(ansi r)The specified git ref ($diff_to) does not exist, please check it again.(ansi reset)'
-      exit $ECODE.INVALID_PARAMETER
-    }
-    git diff $diff_from ($diff_to | default HEAD)
-  } else if not (git-check $local_repo --check-repo=1) {
-    print $'Current directory ($local_repo) is (ansi r)NOT(ansi reset) a git repo, bye...(char nl)'
-    exit $ECODE.CONDITION_NOT_SATISFIED
-  } else if ($patch_cmd | is-not-empty) {
-    let valid = is-safe-git $patch_cmd
-    if not $valid { exit $ECODE.INVALID_PARAMETER }
-    nu -c $patch_cmd
-  } else { git diff }
-
-  if ($content | is-empty) {
-    print $'(ansi g)Nothing to review.(ansi reset)'; exit $ECODE.SUCCESS
+  } catch {
+    print -e $'(ansi r)Unrecognized content:(ansi reset) ($line)'
+    exit $ECODE.SERVER_ERROR
   }
-  let awk_bin = (prepare-awk)
-  let outdated_awk = $'If you are using an (ansi r)outdated awk version(ansi reset), please upgrade to the latest version or use gawk latest instead.'
-  if ($include | is-not-empty) {
-    let patterns = $include | split row ','
-    $content = $content | try { ^$awk_bin (generate-include-regex $patterns) } catch { print $outdated_awk; exit $ECODE.OUTDATED }
-  }
-  if ($exclude | is-not-empty) {
-    let patterns = $exclude | split row ','
-    $content = $content | try { ^$awk_bin (generate-exclude-regex $patterns) } catch { print $outdated_awk; exit $ECODE.OUTDATED }
-  }
-  $content
 }
 
-# AWK family version check for both awk and gawk
-#  awk: awk version 20250116 -> 20250116
-# gawk: GNU Awk 5.3.1, API 4.0, (GNU MPFR 4.2.1, GNU MP 6.3.0) -> 5.3.1
-def get-awk-ver [awk_bin: string] {
-  ^$awk_bin --version | lines | first | split row , | first | split row ' ' | last
-}
-
-# Prepare gawk for macOS
-export def prepare-awk [] {
-  const MIN_GAWK_VERSION = '5.3.1'
-  const MIN_AWK_VERSION = '20250116'
-  let awk_installed = is-installed awk
-  let gawk_installed = is-installed gawk
-
-  if $awk_installed {
-    let awk_version = get-awk-ver awk
-    if (compare-ver $awk_version $MIN_AWK_VERSION) >= 0 {
-      print $'Current awk version: ($awk_version)'
-      return 'awk'
-    }
-  }
-  if $gawk_installed {
-    let gawk_version = get-awk-ver gawk
-    if (compare-ver $gawk_version $MIN_GAWK_VERSION) >= 0 {
-      print $'Current gawk version: ($gawk_version)'
-      return 'gawk'
-    } else if (windows?) and ($env.GITHUB_ACTIONS? == 'true') {
-      let awk_info = (install-gawk-for-actions)
-      print $'Current gawk version: ($awk_info.version)'
-      return $awk_info.awk_bin
-    }
-  }
-  if (mac?) and (is-installed brew) {
-    brew install gawk
-    print $'Current gawk version: (get-awk-ver gawk)'
-    return 'gawk'
-  }
-  if (not $awk_installed) and (not $gawk_installed) {
-    print $'(ansi r)Neither `awk` nor `gawk` is installed, please install the latest version of `gawk`.(ansi reset)'
-    exit $ECODE.MISSING_BINARY
-  }
-  print $'Current awk version: (get-awk-ver awk)'
-  'awk'
-}
-
-# Convert glob patterns to regex patterns
-# Pass in *.nu directly as a regular expression does not work, because * in
-# a regular expression needs to be attached to the previous pattern, the correct
-# form should be .* So we should convert each glob pattern to a regex pattern:
-# 1. Convert * to .*
-# 2. Convert ? to . (optional, as needed)
-# 3. Convert / to \/
-def glob-to-regex [patterns: list<string>] {
-  # Handle empty patterns list
-  if ($patterns | length) == 0 { return '' }
-
-  # Define a mapping of characters to escape
-  let regex_escapes = {
-    # Escape special regex characters first
-    "\\.": "\\\\.",
-    "\\+": "\\\\+",
-    "\\^": "\\\\^",
-    "\\$": "\\\\$",
-    "\\(": "\\\\(",
-    "\\)": "\\\\)",
-    "\\[": "\\\\[",
-    "\\]": "\\\\]",
-    "\\{": "\\\\{",
-    "\\}": "\\\\}",
-    "\\|": "\\\\|",
-    # Then convert glob patterns to regex patterns
-    "*": ".*",
-    "?": ".",
-    "/": "\\/",
-  }
-
-  $patterns
-    | each { |pat|
-        $regex_escapes | columns | reduce -f $pat { |k, acc|
-          $acc | str replace -a $k ($regex_escapes | get $k)
-        }
-      }
-    | str join '|'
-}
-
-# Generate the awk include regex pattern string for the specified patterns
-export def generate-include-regex [patterns: list<string>] {
-  let pattern = glob-to-regex $patterns
-  $"/^diff --git/{p=/^diff --git a\\/($pattern)/}p"
-}
-
-# Generate the awk exclude regex pattern string for the specified patterns
-export def generate-exclude-regex [patterns: list<string>] {
-  let pattern = glob-to-regex $patterns
-  $"/^diff --git/{p=/^diff --git a\\/($pattern)/}!p"
-}
-
-# Check if the git command is safe to run in the shell
-# Validate command examples:
-#  - git show
-#  - git diff
-#  - git show head~1
-#  - git diff 2393375 71f5a31
-#  - git diff 2393375 71f5a31 nu/*
-#  - git diff 2393375 71f5a31 :!nu/*
-export def is-safe-git [cmd: string] {
-  let normalized_cmd = ($cmd | str trim | str downcase)
-
-  # Define allowed command patterns with named capture groups for better validation
-  let git_cmd_pattern = '^git\s+(show|diff)(?:\s+(?:[a-zA-Z0-9_\-\.~/]+)){0,3}(?:\s+(?::[!]?)?[a-zA-Z0-9_\-\.\*\/]+){0,2}$'
-
-  if ($normalized_cmd | find -r $git_cmd_pattern | is-empty) {
-    print $'(ansi r)Invalid git command format. (ansi g)Only simple `git show` or `git diff` commands are allowed.(ansi reset)'
-    return false
-  }
-  true
-}
-
-# Setup scoop and install gawk for GitHub Windows runners
-# This command is essential for resolving the issue of simultaneously
-# applying include and exclude patterns on GitHub's Windows runners.
-def install-gawk-for-actions [] {
-  # Install scoop using PowerShell
-  pwsh -c r#'
-    Invoke-Expression (New-Object System.Net.WebClient).DownloadString("https://get.scoop.sh")
-    $env:Path = "$env:USERPROFILE\scoop\shims;" + $env:Path; scoop update; scoop install gawk
-    '# | complete | get stdout | print
-  let awk_bin = $'($nu.home-path)/scoop/shims/gawk.exe'
-  let version = get-awk-ver $awk_bin
-  { awk_bin: $awk_bin, version: $version }
+# Coalesce the reasoning content
+def coalesce-reasoning [] {
+  let msg = $in
+  $msg.reasoning_content? | default $msg.reasoning?
 }
 
 alias main = deepseek-review

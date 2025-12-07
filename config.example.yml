@@ -17,8 +17,8 @@ settings:
   # If the content length exceeds the non-zero limit, the review will be skipped
   # Note that it's unicode width not LLM token length
   max-length: 0
-  # The temperature of the model, The value should be between 0 and 2, with default value 1.0
-  temperature: 1.0
+  # The temperature of the model, The value should be between 0 and 2, with default value 0.3
+  temperature: 0.3
   # The user prompt name to use for DeepSeek API select from 'prompts.user'
   user-prompt: 'default'
   # The system prompt name to use for DeepSeek API select from 'prompts.system'
@@ -45,6 +45,7 @@ providers:
         alias: r1
         enabled: true
         description: 'DeepSeek R1 model running on Ollama'
+
   - name: 'DeepSeek'
     token: 'YOUR_DEEPSEEK_TOKEN'    # Required, The API token for the provider
     base-url: 'https://api.deepseek.com'
@@ -69,6 +70,18 @@ providers:
       - name: 'deepseek-ai/DeepSeek-R1'
         alias: r1
         description: 'SiliconFlow DeepSeek R1 model'
+
+  - name: OpenRouter
+    token: sk-or-v1-*****
+    base-url: https://openrouter.ai/api/v1
+    models:
+      - name: deepseek/deepseek-chat-v3-0324:free
+        alias: v3
+        enabled: true
+        description: 'OpenRouter DeepSeek V3 model'
+      - name: deepseek/deepseek-r1:free
+        alias: r1
+        description: 'OpenRouter DeepSeek R1 model'
 
 # Multiple Prompts could be defined, select the one by name in 'settings.user-prompt' or 'settings.system-prompt'
 prompts:

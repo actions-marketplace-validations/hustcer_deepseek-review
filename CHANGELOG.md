@@ -1,6 +1,67 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [1.19.0] - 2025-07-23
+
+### Bug Fixes
+
+- Fix "variable not found" error (#185)
+- Fix getting Nu binary path for Nushell 0.106
+
+### Deps
+
+- Upgrade Nu to v0.106 (#186)
+
+## [1.18.0] - 2025-06-11
+
+### Features
+
+- Set default `temperature` to **0.3** for code review (#181)
+
+### Miscellaneous Tasks
+
+- Refine diff flag descriptions in docs and scripts (#177)
+- Upgrade `Nu` to 0.105 and pin [`hustcer/setup-nu`](https://github.com/hustcer/setup-nu) to v3.19 (#183)
+
+### Deps
+
+- Upgrade `nutest` to v1.1.0 (#179)
+
+## [1.17.0] - 2025-04-11
+
+### Bug Fixes
+
+- Read default `include` and `exclude` patterns from config for local code review (#170)
+
+### Features
+
+All the following changes are for local code review only:
+
+- Add code review for `git show head:path/to/file` patch command support (#171)
+- Add write code review result to file by `--output` flag support (#172)
+
+## [1.16.0] - 2025-04-05
+
+### Documentation
+
+- Add alias setup guide for `powershell` (#163)
+
+### Features
+
+- Add OpenRouter deepseek model support (#167)
+
+### Miscellaneous Tasks
+
+- Add alias setup guide for `fish`
+- Add openrouter.ai config example
+- Set minimum required `nushell` version to v0.103
+
+### Refactor
+
+- Refactor `get-diff` custom command (#164)
+- Refactor diff handling by moving logic to separate module (#165)
+- Replace custom `kv.nu` module with `std-rfc/kv` for key-value functionality (#166)
+
 ## [1.15.0] - 2025-03-23
 
 ### Features

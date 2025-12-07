@@ -4,7 +4,7 @@
 # Description: Common helpers for DeepSeek-Review
 #
 
-use kv.nu ['kv set', 'kv get']
+use std-rfc/kv ['kv set', 'kv get']
 
 # Commonly used exit codes
 export const ECODE = {
@@ -17,6 +17,8 @@ export const ECODE = {
   MISSING_DEPENDENCY: 7,
   CONDITION_NOT_SATISFIED: 8,
 }
+
+export const GITHUB_API_BASE = 'https://api.github.com'
 
 # If current host is Windows
 export def windows? [] {
@@ -49,8 +51,8 @@ export def compare-ver [v1: string, v2: string] {
   # If you want to compare more parts use the following code:
   # for i in 0..([2 ($a | length) ($b | length)] | math max)
   for i in 0..2 {
-    let x = $a | get -i $i | default 0
-    let y = $b | get -i $i | default 0
+    let x = $a | get -o $i | default 0
+    let y = $b | get -o $i | default 0
     if $x > $y { return 1    }
     if $x < $y { return (-1) }
   }
@@ -79,28 +81,69 @@ export def check-nushell [--debug] {
 }
 
 # Converts a .env file into a record
-# may be used like this: open .env | load-env
-# works with quoted and unquoted .env files
-export def 'from env' []: string -> record {
-  lines
-    | split column '#' # remove comments
-    | get column1
-    | parse '{key}={value}'
-    | update value {
-        str trim                        # Trim whitespace between value and inline comments
-          | str trim -c '"'             # unquote double-quoted values
-          | str trim -c "'"             # unquote single-quoted values
-          | str replace -a "\\n" "\n"   # replace `\n` with newline char
-          | str replace -a "\\r" "\r"   # replace `\r` with carriage return
-          | str replace -a "\\t" "\t"   # replace `\t` with tab
-      }
-    | transpose -r -d
+# May be used like this: open .env | load-env
+# Works with quoted and unquoted .env files
+export def "from env" []: string -> record {
+  let input = $in
+
+  # Process escape sequences in double-quoted values using str replace chain
+  # Use NUL char as placeholder to avoid replacement conflicts
+  let process_escapes = {|content: string|
+    $content
+      | str replace -a '\\' (char nul)   # Placeholder for \\ to avoid conflicts
+      | str replace -a '\n' (char nl)
+      | str replace -a '\r' (char cr)
+      | str replace -a '\t' (char tab)
+      | str replace -a '\"' '"'
+      | str replace -a (char nul) '\'    # Restore \\ to single \
+  }
+
+  # Parse double-quoted value with escape sequence support
+  let parse_double_quoted = {|val: string|
+    let matched = ($val | parse -r '^"(?P<content>(?:[^"\\]|\\.)*)"')
+    if ($matched | is-empty) { $val | str trim -c '"' } else { do $process_escapes $matched.0.content }
+  }
+
+  # Parse single-quoted value (no escape processing)
+  let parse_single_quoted = {|val: string|
+    let matched = ($val | parse -r "^'(?P<content>[^']*)'")
+    if ($matched | is-empty) { $val | str trim -c "'" } else { $matched.0.content }
+  }
+
+  # Parse unquoted value: handle escaped hash (\#) and strip inline comments
+  let parse_unquoted = {|val: string|
+    $val
+      | str replace -a '\#' (char nul)    # Placeholder for \#
+      | split row '#'                     # Split by comment delimiter
+      | first                             # Take content before first #
+      | str replace -a (char nul) '#'     # Restore \# to #
+      | str trim
+  }
+
+  # Parse value based on its format
+  let parse_value = {|val: string|
+    match $val {
+      $v if ($v | str starts-with '"') => { do $parse_double_quoted $v }
+      $v if ($v | str starts-with "'") => { do $parse_single_quoted $v }
+      _ => { do $parse_unquoted $val }
+    }
+  }
+
+  let parsed = $input | lines
+    | str trim
+    | compact -e
+    | where {|line| not ($line | str starts-with '#') }
+    | parse "{key}={value}"
+    | update key {|row| $row.key | str trim | str replace -r '^export\s+' '' }
+    | update value {|row| do $parse_value ($row.value | str trim) }
+
+  if ($parsed | is-empty) { {} } else { $parsed | transpose -r -d -l }
 }
 
 # Compact the record by removing empty columns
 export def compact-record []: record -> record {
   let record = $in
-  let empties = $record | columns | filter {|it| $record | get $it | is-empty }
+  let empties = $record | columns | where {|it| $record | get $it | is-empty }
   $record | reject ...$empties
 }
 
@@ -169,6 +212,6 @@ export def has-ref [
 
 # Notify the user that the `CHAT_TOKEN` hasn't been configured
 export const NO_TOKEN_TIP = (
-  "**Notice:** It looks like you're using [`hustcer/deepseek-review`](https://github.com/hustcer/deepseek-review), but the `CHAT_TOKEN` hasn't" +
-  "been configured in your repo's Variables/Secrets. Please ensure this token is set for proper functionality. For step-by-step guidance, refer" +
+  "**Notice:** It looks like you're using [`hustcer/deepseek-review`](https://github.com/hustcer/deepseek-review), but the `CHAT_TOKEN` hasn't " +
+  "been configured in your repo's **Variables/Secrets**. Please ensure this token is set for proper functionality. For step-by-step guidance, refer " +
   "to the **CHAT_TOKEN Config** section of [README](https://github.com/hustcer/deepseek-review/blob/main/README.md#code-review-with-github-action).")

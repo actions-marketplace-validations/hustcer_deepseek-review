@@ -21,6 +21,7 @@
 - 通过本地 CLI 直接审查远程 GitHub PR
 - 通过本地 CLI 使用 DeepSeek 审查任何本地仓库的提交变更
 - 允许通过自定义 `git show`/`git diff` 命令生成变更记录并进行审查
+- 允许将代码审查结果以 Markdown 格式输出到指定文件
 - 跨平台：理论上只要能运行 [Nushell](https://github.com/nushell/nushell) 即可使用本工具
 
 ### 本地或 GH Action
@@ -123,7 +124,7 @@ jobs:
 | max-length     | Int    | 可选，待审查内容的最大 Unicode 长度, 默认 `0` 表示没有限制，超过非零值则跳过审查 |
 | sys-prompt     | String | 可选，系统提示词对应入参中的 `$sys_prompt`, 默认值见后文注释      |
 | user-prompt    | String | 可选，用户提示词对应入参中的 `$user_prompt`, 默认值见后文注释     |
-| temperature    | Number | 可选，采样温度，介于 `0` 和 `2` 之间, 默认值 `1.0`        |
+| temperature    | Number | 可选，采样温度，介于 `0` 和 `2` 之间, 默认值 `0.3`        |
 | include-patterns | String | 可选，代码审查中要包含的以逗号分隔的文件模式，无默认值 |
 | exclude-patterns | String | 可选，代码审查中要排除的以逗号分隔的文件模式，默认值为 `pnpm-lock.yaml,package-lock.json,*.lock` |
 | github-token   | String | 可选，用于访问 API 进行 PR 管理的 GitHub Token，默认为 `${{ github.token }}` |
@@ -160,7 +161,7 @@ DeepSeek 接口调用入参:
 
 在本地进行代码审查，支持 `macOS`, `Ubuntu` & `Windows` 不过需要安装以下工具：
 
-- [`Nushell`](https://www.nushell.sh/book/installation.html), 建议安装最新版本
+- [`Nushell`](https://www.nushell.sh/book/installation.html), 建议安装最新版本(最低版本 `0.109.1`)
 - [`awk`](https://github.com/onetrueawk/awk) 或者 [`gawk`](https://www.gnu.org/software/gawk/) 的最新版版本，优先推荐 `gawk`
 - 接下来只需要把本仓库代码克隆到本地，然后进入仓库目录执行 `nu cr -h` 即可看到类似如下输出:
 
@@ -175,8 +176,8 @@ Flags:
   -r, --repo <string>: GitHub repo name, e.g. hustcer/deepseek-review
   -n, --pr-number <string>: GitHub PR number
   -k, --gh-token <string>: Your GitHub token, fallback to GITHUB_TOKEN env var
-  -t, --diff-to <string>: Diff to git REF
-  -f, --diff-from <string>: Diff from git REF
+  -f, --diff-from <string>: Git diff starting commit SHA
+  -t, --diff-to <string>: Git diff ending commit SHA
   -c, --patch-cmd <string>: The `git show` or `git diff` command to get the diff content, for local CR only
   -l, --max-length <int>: Maximum length of the content for review, 0 means no limit.
   -m, --model <string>: Model name, or read from CHAT_MODEL env var, `deepseek-chat` by default
@@ -186,8 +187,9 @@ Flags:
   -u, --user-prompt <string>: Default to $DEFAULT_OPTIONS.USER_PROMPT,
   -i, --include <string>: Comma separated file patterns to include in the code review
   -x, --exclude <string>: Comma separated file patterns to exclude in the code review
-  -T, --temperature <float>: Temperature for the model, between `0` and `2`, default value `1.0`
+  -T, --temperature <float>: Temperature for the model, between `0` and `2`, default value `0.3`
   -C, --config <string>: Config file path, default to `config.yml`
+  -o, --output <string>: Output file path
   -h, --help: Display the help message for this command
 
 Parameters:
@@ -238,6 +240,8 @@ function cr {
 cr
 # 对本地当前目录所在仓库 `git diff f536acc` 修改内容进行代码审查
 cr --diff-from f536acc
+# 对本地当前目录所在仓库 `git diff f536acc` 修改内容进行代码审查并将审查结果输出到 review.md
+cr --diff-from f536acc --output review.md
 # 对本地当前目录所在仓库 `git diff f536acc 0dd0eb5` 修改内容进行代码审查
 cr --diff-from f536acc --diff-to 0dd0eb5
 # 通过 --patch-cmd 参数对本地当前目录所在仓库变更内容进行审查

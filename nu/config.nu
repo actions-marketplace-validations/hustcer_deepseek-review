@@ -28,15 +28,15 @@ def check-prompts [options: record] {
 
 # Check if the specified type of prompt key exists in the config.yml file
 def check-prompt [options: record, type: string] {
-  let prompt_key = $options.settings | get -i $'($type)-prompt' | default ''
+  let prompt_key = $options.settings | get -o $'($type)-prompt' | default ''
   if ($prompt_key | is-empty) {
     print $'(ansi r)The ($type) prompt key is missing in `settings.($type)-prompt` config.yml file.(ansi reset)'
     exit $ECODE.INVALID_PARAMETER
   }
-  let prompt = $options.prompts | get -i $type
+  let prompt = $options.prompts | get -o $type
     | default []
     | where name == $prompt_key
-    | get -i 0.prompt
+    | get -o 0.prompt
   if ($prompt | is-empty) {
     print $'The ($type) prompt (ansi r)($prompt_key)(ansi reset) is missing in `prompts.($type)` of config.yml file.'
     exit $ECODE.INVALID_PARAMETER
@@ -59,11 +59,11 @@ def check-providers [options: record] {
     exit $ECODE.INVALID_PARAMETER
   }
   # Each provider should have name, token and models field
-  $options.providers | each {|it|
-    let empties = [name token models] | filter { |field| $it | get -i $field | is-empty }
+  $options.providers | each {|p|
+    let empties = [name token models] | where { |field| $p | get -o $field | is-empty }
     if ($empties | is-not-empty) {
       print $'Field (ansi r)`($empties | str join ,)`(ansi reset) should not be empty for provider:'
-      $it | table -e -t psql | print
+      $p | table -e -t psql | print
       exit $ECODE.INVALID_PARAMETER
     }
   }
@@ -91,7 +91,8 @@ def check-models [options: record] {
 }
 
 # Check if the config.yml file exists and if it's valid
-export def config-check [--config: string = $SETTING_FILE] {
+export def config-check [--config: string] {
+  let config = $config | default $SETTING_FILE
   file-exists $config
   let options = open $config
   check-prompts $options
@@ -105,7 +106,7 @@ def get-model-envs [settings: record, model?: string = ''] {
   let provider = $settings.providers
     | default []
     | where name == $name
-    | get -i 0
+    | get -o 0
     | default {}
   let model_name = $provider.models
     | default []
@@ -114,7 +115,7 @@ def get-model-envs [settings: record, model?: string = ''] {
       } else {
         $it.name == $model or $it.alias? == $model }
       }
-    | get -i 0.name
+    | get -o 0.name
     | default $model
 
   { CHAT_TOKEN: $provider.token?, BASE_URL: $provider.base-url?, CHAT_URL: $provider.chat-url?, CHAT_MODEL: $model_name }
@@ -132,12 +133,12 @@ export def --env config-load [
   let user_prompt = $all_settings.prompts?.user?
     | default []
     | where name == ($settings.user-prompt? | default '')
-    | get -i 0.prompt
+    | get -o 0.prompt
 
   let system_prompt = $all_settings.prompts?.system?
     | default []
     | where name == ($settings.system-prompt? | default '')
-    | get -i 0.prompt
+    | get -o 0.prompt
 
   let model_envs = get-model-envs $all_settings $model
 
