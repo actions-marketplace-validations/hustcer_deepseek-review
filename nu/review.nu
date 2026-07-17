@@ -42,8 +42,74 @@ const IGNORED_MESSAGES = {
 # When make http post pretend to be curl, it gets a response just as quickly as curl.
 const HTTP_HEADERS = [User-Agent curl/8.9]
 
+def submit-review-to-pr [
+  repo: string,
+  pr_number: string,
+  review_body: string,
+] {
+  if ($repo | is-empty) or ($pr_number | is-empty) {
+    print $'(ansi r)Repo or PR number is empty, cannot submit review.(ansi reset)'
+    exit $ECODE.INVALID_PARAMETER
+  }
+
+  let review_url = $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)/reviews'
+  let headers = [
+    Authorization $'Bearer ($env.GH_TOKEN)'
+    Accept application/vnd.github+json
+    X-GitHub-Api-Version '2022-11-28'
+    ...$HTTP_HEADERS
+  ]
+
+  print $'Posting review to: (ansi g)($review_url)(ansi reset)'
+
+  try {
+    let response = http post -e -f -t application/json -H $headers $review_url {
+      event: 'COMMENT'
+      body: $review_body
+    }
+
+    let status = $response | get -o status | default 0
+
+    if $status >= 200 and $status < 300 {
+      print $'Review submitted successfully! HTTP (ansi g)($status)(ansi reset)'
+    } else {
+      print $'(ansi r)Failed to submit review. HTTP Status: ($status)(ansi reset)'
+      let err_body = $response | get -o body | default ''
+      if ($err_body | is-not-empty) {
+        print $'(ansi r)Response body:(ansi reset)'
+        print $err_body
+      }
+      exit $ECODE.SERVER_ERROR
+    }
+  } catch {|err|
+    print $'(ansi r)Failed to submit review to PR — network or connection error:(ansi reset)'
+    $err | table -e | print
+    exit $ECODE.SERVER_ERROR
+  }
+}
+
+def is-pr-locked [
+  repo: string,
+  pr_number: string,
+] {
+  let url = $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)'
+  let headers = [
+    Authorization $'Bearer ($env.GH_TOKEN)'
+    Accept application/vnd.github+json
+    X-GitHub-Api-Version '2022-11-28'
+    ...$HTTP_HEADERS
+  ]
+
+  try {
+    let response = http get -H $headers $url
+    ($response | get -o locked | default false)
+  } catch {
+    false
+  }
+}
+
 const DEFAULT_OPTIONS = {
-  MODEL: 'deepseek-chat',
+  MODEL: 'deepseek-v4-flash',
   TEMPERATURE: 0.3,
   BASE_URL: 'https://api.deepseek.com',
   USER_PROMPT: 'Please review the following code changes:',
@@ -62,7 +128,7 @@ export def --env deepseek-review [
   --diff-from(-f): string,  # Git diff starting commit SHA
   --patch-cmd(-c): string,  # The `git show` or `git diff` command to get the diff content, for local CR only
   --max-length(-l): int,    # Maximum length of the content for review, 0 means no limit.
-  --model(-m): string,      # Model name, or read from CHAT_MODEL env var, `deepseek-chat` by default
+  --model(-m): string,      # Model name, or read from CHAT_MODEL env var, `deepseek-v4-flash` by default
   --base-url(-b): string,   # DeepSeek API base URL, fallback to BASE_URL env var
   --chat-url(-U): string,   # DeepSeek Model chat full API URL, e.g. http://localhost:11535/api/chat
   --sys-prompt(-s): string  # Default to $DEFAULT_OPTIONS.SYS_PROMPT,
@@ -70,6 +136,7 @@ export def --env deepseek-review [
   --include(-i): string,    # Comma separated file patterns to include in the code review
   --exclude(-x): string,    # Comma separated file patterns to exclude in the code review
   --temperature(-T): float, # Temperature for the model, between `0` and `2`, default value `0.3`
+  --comment: string,       # Additional comment text from a PR comment mention trigger
 ]: nothing -> nothing {
 
   $env.config.table.mode = 'psql'
@@ -105,6 +172,11 @@ export def --env deepseek-review [
   }
   $env.GH_TOKEN = $gh_token | default $env.GITHUB_TOKEN?
 
+  if $is_action and ($pr_number | is-not-empty) and ($repo | is-not-empty) and (is-pr-locked $repo $pr_number) {
+    print $'(ansi y)PR #($pr_number) is locked, skipping review.(ansi reset)'
+    exit $ECODE.SUCCESS
+  }
+
   validate-token $token --pr-number $pr_number --repo $repo
   let hint = if not $is_action and ($pr_number | is-empty) {
     $'🚀 Initiate the code review by DeepSeek AI for local changes ...'
@@ -128,14 +200,20 @@ export def --env deepseek-review [
   print $'Review content length: (ansi g)($length)(ansi reset), current max length: (ansi g)($max_length)(ansi reset)'
   let sys_prompt = $sys_prompt | default $env.SYSTEM_PROMPT? | default $DEFAULT_OPTIONS.SYS_PROMPT
   let user_prompt = $user_prompt | default $env.USER_PROMPT? | default $DEFAULT_OPTIONS.USER_PROMPT
+  let user_content = if ($comment | is-not-empty) {
+    $"($user_prompt):\n($content)\n\nAdditional context from PR comment (char lp)enclosed in <comment> tags(char rp):\n<comment>\n($comment)\n</comment>"
+  } else {
+    $"($user_prompt):\n($content)"
+  }
   let payload = {
     model: $model,
     stream: $stream,
     temperature: $temperature,
     messages: [
       { role: 'system', content: $sys_prompt },
-      { role: 'user', content: $"($user_prompt):\n($content)" }
-    ]
+      { role: 'user', content: $user_content }
+    ],
+    thinking: { type: 'disabled' }
   }
   if $debug { print $'(char nl)Code Changes:'; hr-line; print $content }
   print $'(char nl)Waiting for response from (ansi g)($url)(ansi reset) ...'
@@ -163,8 +241,8 @@ export def --env deepseek-review [
 
   match $output_mode {
     'action' => {
-      post-comments-to-pr $repo $pr_number $result
-      print $'✅ Code review finished！PR (ansi g)#($pr_number)(ansi reset) review result was posted as a comment.'
+      submit-review-to-pr $repo $pr_number $result
+      print $'✅ Code review finished！PR (ansi g)#($pr_number)(ansi reset) review result was submitted as a review.'
     }
     'file' => { write-review-to-file $output $setting $result $response }
     _ => { print $'Code Review Result:'; hr-line; print $result }
@@ -208,7 +286,7 @@ def write-review-to-file [
 def validate-token [token?: string, --pr-number: string, --repo: string] {
   if ($token | is-empty) {
     print $'(ansi r)Please provide your DeepSeek API token by setting `CHAT_TOKEN` or passing it as an argument.(ansi reset)'
-    if ($pr_number | is-not-empty) { post-comments-to-pr $repo $pr_number $NO_TOKEN_TIP }
+    if ($pr_number | is-not-empty) { submit-review-to-pr $repo $pr_number $NO_TOKEN_TIP }
     exit $ECODE.INVALID_PARAMETER
   }
   $token
@@ -221,23 +299,6 @@ def validate-temperature [temp: float] {
     exit $ECODE.INVALID_PARAMETER
   }
   $temp
-}
-
-# Post review comments to GitHub PR
-def post-comments-to-pr [
-  repo: string,        # GitHub repository name, e.g. hustcer/deepseek-review
-  pr_number: string,   # GitHub PR number
-  comments: string,    # Comments content to post
-] {
-  let comment_url = $'($GITHUB_API_BASE)/repos/($repo)/issues/($pr_number)/comments'
-  let BASE_HEADER = [Authorization $'Bearer ($env.GH_TOKEN)' Accept application/vnd.github.v3+json ...$HTTP_HEADERS]
-  try {
-    http post -t application/json -H $BASE_HEADER $comment_url { body: $comments }
-  } catch {|err|
-    print $'(ansi r)Failed to post comments to PR: (ansi reset)'
-    $err | table -e | print
-    exit $ECODE.SERVER_ERROR
-  }
 }
 
 # Output the streaming response of review result from DeepSeek API
@@ -271,9 +332,9 @@ def streaming-output [
           let delta = $in
           if ($delta | coalesce-reasoning | is-not-empty) { kv set reasoning ((kv get reasoning) + 1) }
           if (kv get reasoning) == 1 { print $'(char nl)Reasoning Details:'; hr-line }
-          if ($delta.content | is-not-empty) { kv set content ((kv get content) + 1) }
+          if ($delta.content? | is-not-empty) { kv set content ((kv get content) + 1) }
           if (kv get content) == 1 { print $'(char nl)Review Details:'; hr-line }
-          print -n ($delta | coalesce-reasoning | default $delta.content)
+          print -n ($delta | coalesce-reasoning | default ($delta.content? | default ''))
         }
       }
 

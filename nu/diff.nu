@@ -80,6 +80,13 @@ def get-pr-diff [
     exit $ECODE.SUCCESS
   }
 
+  let commit_msg = http get -H $BASE_HEADER $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)/commits'
+                   | last | get commit.message
+  if ($IGNORE_REVIEW_KEYWORDS | any {|it| $commit_msg =~ $it }) {
+    print $'(ansi r)The latest PR commit message contains keywords to skip the review, bye...(ansi reset)'
+    exit $ECODE.SUCCESS
+  }
+
   # Get the diff content of the PR
   http get -H $DIFF_HEADER $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)' | str trim
 }
@@ -112,8 +119,13 @@ def get-patch-diff [
     exit $ECODE.INVALID_PARAMETER
   }
 
-  # Get the diff content from the specified git command
-  nu -c $cmd
+  # Run the validated command with separated arguments instead of `nu -c $cmd`,
+  # so the string is never re-interpreted by a shell/nu (no newline injection).
+  # `is-safe-git` guarantees a simple `git show`/`git diff` whose tokens contain
+  # no spaces, quotes, metacharacters, or control characters, so splitting on
+  # spaces is safe here. Pathspecs like `nu/*` / `:!nu/*` reach git verbatim.
+  let argv = $cmd | str trim | split row -r ' +'
+  ^($argv | first) ...($argv | skip 1)
 }
 
 # Apply file filters to the diff content to include or exclude specific files

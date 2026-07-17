@@ -57,35 +57,42 @@ export def prepare-awk [] {
 # 1. Convert * to .*
 # 2. Convert ? to . (optional, as needed)
 # 3. Convert / to \/
+# 4. Convert **/ to an optional directory prefix
 def glob-to-regex [patterns: list<string>] {
   # Handle empty patterns list
   if ($patterns | length) == 0 { return '' }
 
-  # Define a mapping of characters to escape
+  # Map each character to its regex replacement. Order matters: escape the regex
+  # metacharacters FIRST (so a literal `.` becomes `\.`), THEN expand the glob
+  # wildcards `*`/`?` and escape `/`. Keys are the bare characters — an earlier
+  # version used backslash-prefixed keys (e.g. `"\\."`), which never matched plain
+  # glob input, so metacharacters like `.` and `+` were left unescaped.
   let regex_escapes = {
     # Escape special regex characters first
-    "\\.": "\\\\.",
-    "\\+": "\\\\+",
-    "\\^": "\\\\^",
-    "\\$": "\\\\$",
-    "\\(": "\\\\(",
-    "\\)": "\\\\)",
-    "\\[": "\\\\[",
-    "\\]": "\\\\]",
-    "\\{": "\\\\{",
-    "\\}": "\\\\}",
-    "\\|": "\\\\|",
+    '.': '\.',
+    '+': '\+',
+    '^': '\^',
+    '$': '\$',
+    '(': '\(',
+    ')': '\)',
+    '[': '\[',
+    ']': '\]',
+    '{': '\{',
+    '}': '\}',
+    '|': '\|',
     # Then convert glob patterns to regex patterns
-    "*": ".*",
-    "?": ".",
-    "/": "\\/",
+    '*': '.*',
+    '?': '.',
+    '/': '\/',
   }
 
   $patterns
     | each { |pat|
-        $regex_escapes | columns | reduce -f $pat { |k, acc|
+        let double_star_prefix = '__DOUBLE_STAR_SLASH__'
+        let normalized = $pat | str replace -a '**/' $double_star_prefix
+        $regex_escapes | columns | reduce -f $normalized { |k, acc|
           $acc | str replace -a $k ($regex_escapes | get $k)
-        }
+        } | str replace -a $double_star_prefix '(.*\/)?'
       }
     | str join '|'
 }
@@ -93,13 +100,13 @@ def glob-to-regex [patterns: list<string>] {
 # Generate the awk include regex pattern string for the specified patterns
 export def generate-include-regex [patterns: list<string>] {
   let pattern = glob-to-regex $patterns
-  $"/^diff --git/{p=/^diff --git a\\/($pattern)/}p"
+  $"/^diff --git/{p=/^diff --git a\\/($pattern) b\\//}p"
 }
 
 # Generate the awk exclude regex pattern string for the specified patterns
 export def generate-exclude-regex [patterns: list<string>] {
   let pattern = glob-to-regex $patterns
-  $"/^diff --git/{p=/^diff --git a\\/($pattern)/}!p"
+  $"/^diff --git/{p=/^diff --git a\\/($pattern) b\\//}!p"
 }
 
 # Check if the git command is safe to run in the shell
@@ -113,11 +120,27 @@ export def generate-exclude-regex [patterns: list<string>] {
 export def is-safe-git [cmd: string] {
   let normalized_cmd = ($cmd | str trim | str downcase)
 
-  # Define allowed command patterns with named capture groups for better validation
-  let git_cmd_pattern = '^git\s+(show|diff)(?:\s+(?:[a-zA-Z0-9_\-\.~/]+(?::[a-zA-Z0-9_\-\.\*\/]+)?)){0,3}(?:\s+(?::[!]?)?[a-zA-Z0-9_\-\.\*\/]+){0,2}$'
+  # Reject embedded newlines/CR outright. `nu -c`/a shell would treat a second
+  # line as its own command, and line-oriented matchers (see below) can mask it.
+  if ($normalized_cmd =~ r#'[\r\n]'#) {
+    print $'(ansi r)Invalid git command: it must not contain newline characters.(ansi reset)'
+    return false
+  }
 
-  if ($normalized_cmd | find -r $git_cmd_pattern | is-empty) {
+  # Allowed command grammar. Separators use a literal space ` +`, NOT `\s`
+  # (`\s` also matches newlines/tabs). Match the WHOLE string with `!~` rather
+  # than `find -r`: `find` is line-oriented, so a multi-line (injected) command
+  # like `git diff x(char nl)rm -rf /` would match only its first line and pass.
+  let git_cmd_pattern = '^git +(show|diff)(?: +(?:[a-zA-Z0-9_\-\.~/]+(?::[a-zA-Z0-9_\-\.\*\/]+)?)){0,3}(?: +(?::[!]?)?[a-zA-Z0-9_\-\.\*\/]+){0,2}$'
+
+  if ($normalized_cmd !~ $git_cmd_pattern) {
     print $'(ansi r)Invalid git command format. (ansi g)Only simple `git show` or `git diff` commands are allowed.(ansi reset)'
+    return false
+  }
+
+  let argv = $normalized_cmd | split row -r ' +'
+  if ($argv | skip 2 | any {|arg| $arg | str starts-with '-' }) {
+    print $'(ansi r)Invalid git command: git options are not allowed in patch commands.(ansi reset)'
     return false
   }
   true

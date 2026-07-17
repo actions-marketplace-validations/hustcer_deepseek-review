@@ -8,7 +8,11 @@ on:
       - opened      # Triggers when a PR is opened
       - reopened    # Triggers when a PR is reopened
       - synchronize # Triggers when a commit is pushed to the PR
+      - ready_for_review # Triggers when a PR is marked as ready for review
       # - labeled   # Triggers when a label is added to the PR
+  issue_comment:
+    types:
+      - created     # Triggers when a comment is created on a PR
 
 # fix: GraphQL: Resource not accessible by integration (addComment) error
 permissions:
@@ -16,6 +20,8 @@ permissions:
 
 jobs:
   setup-deepseek-review:
+    if: github.event_name != 'pull_request_target' || github.event.pull_request.draft == false
+    timeout-minutes: 30
     runs-on: macos-latest
     name: Code Review
     # Make sure the code review happens only when the PR has the label 'ai review'
@@ -29,15 +35,16 @@ jobs:
           # model: 'deepseek-r1'                            # Infinigence's DeepSeek R1 model
           # base-url: 'https://cloud.infini-ai.com/maas/v1' # Infinigence's API base URL
           # model: 'deepseek-ai/DeepSeek-V3'                # SiliconFlow's DeepSeek V3 model
-          model: 'deepseek-ai/DeepSeek-R1'                  # SiliconFlow's DeepSeek R1 model
-          base-url: 'https://api.siliconflow.cn/v1'         # SiliconFlow's API base URL
+          model: 'deepseek-v4-pro'                          # Official DeepSeek v4 Pro model
+          # base-url: 'https://api.siliconflow.cn/v1'       # SiliconFlow's API base URL
+          watch-mention: '@github-actions'
           # Store the chat token in GitHub Secrets, don't expose it in the workflow file
           chat-token: ${{ secrets.CHAT_TOKEN }}
           sys-prompt: >
             As a senior Nushell engineer, perform comprehensive script review with focus on:
 
             ### 1. Core Requirements:
-            - Validate Nu 0.100+ compatibility
+            - Validate Nu 0.110+ compatibility
             - Check structured data handling
             - Verify pipeline efficiency
             - Assess module organization

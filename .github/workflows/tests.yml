@@ -42,15 +42,19 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Checkout Nutest Repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
-          ref: main
+          ref: 097ca6839c861f3f9b7d8b702e92d712b621b8dd
           path: nutest
           repository: vyadh/nutest
           sparse-checkout: nutest/
+
+      - name: Patch Nutest
+        shell: bash
+        run: git -C nutest apply "${GITHUB_WORKSPACE}/tests/resources/nutest-runtime-annotations.patch"
 
       - name: Setup Nu
         uses: hustcer/setup-nu@v3
@@ -74,7 +78,7 @@ jobs:
           )
 
       - name: Publish Test Summary
-        if: runner.os == 'macOS' && matrix.version == '*' && github.ref == 'refs/heads/main'
+        if: runner.os == 'macOS' && matrix.version == '*' && github.ref == 'refs/heads/main' && github.repository_owner == 'hustcer'
         shell: nu {0}
         run: |
           let filename = 'test-summary.json'
